@@ -38,98 +38,70 @@ class DagmaLinear:
     def _score(self, W: np.ndarray) -> typing.Tuple[float, np.ndarray]:
         r"""
         Evaluate value and gradient of the score function.
-
-        Parameters
-        ----------
-        W : np.ndarray
-            :math:`(d,d)` adjacency matrix
-
-        Returns
-        -------
-        typing.Tuple[float, np.ndarray]
-            loss value, and gradient of the loss function
+    
+        In the l2 case, self.cov is either:
+            - empirical covariance, for standard DAGMA
+            - shrinkage covariance, for SCGL/DAGMA-shrinkage
         """
         if self.loss_type == 'l2':
-            dif = self.Id - W 
+            dif = self.Id - W
             rhs = self.cov @ dif
             loss = 0.5 * np.trace(dif.T @ rhs)
             G_loss = -rhs
+    
         elif self.loss_type == 'logistic':
             R = self.X @ W
             loss = 1.0 / self.n * (np.logaddexp(0, R) - self.X * R).sum()
             G_loss = (1.0 / self.n * self.X.T) @ sigmoid(R) - self.cov
+    
         return loss, G_loss
+
+    def _condition_number(self, A: np.ndarray, eps: float = 1e-12) -> float:
+        """
+        Compute spectral condition number for a symmetric covariance matrix.
+        """
+        eigvals = np.linalg.eigvalsh(A)
+        lam_max = float(np.max(eigvals))
+        lam_min = float(np.min(eigvals))
+        lam_min = max(lam_min, eps)
+        return lam_max / lam_min
 
     def _compute_ledoit_wolf_shrinkage_cov(self, X: np.ndarray) -> np.ndarray:
         """
-        Compute Ledoit-Wolf shrinkage covariance using sklearn.
+        Compute Ledoit-Wolf shrinkage covariance.
     
         X must already be centered.
+    
+        This function stores:
+            self.cov_sample
+            self.cov_shrink
+            self.shrinkage_rho
+            self.shrinkage_mu
+            self.cond_sample
+            self.cond_shrink
+    
+        and returns:
+            shrinkage covariance matrix
         """
-    
         X = np.asarray(X, dtype=self.dtype)
+        n, d = X.shape
     
-        sample_cov = (X.T @ X) / float(X.shape[0])
+        sample_cov = (X.T @ X) / float(n)
     
         lw = LedoitWolf().fit(X)
+        shrink_cov = lw.covariance_.astype(self.dtype)
     
         self.cov_sample = sample_cov.astype(self.dtype)
-        self.cov_shrink = lw.covariance_.astype(self.dtype)
+        self.cov_shrink = shrink_cov
         self.shrinkage_rho = float(lw.shrinkage_)
-        self.shrinkage_mu = float(np.trace(sample_cov) / sample_cov.shape[0])
+        self.shrinkage_mu = float(np.trace(sample_cov) / d)
+    
+        self.cond_sample = self._condition_number(self.cov_sample)
+        self.cond_shrink = self._condition_number(self.cov_shrink)
     
         return self.cov_shrink
     
-    def _scoreshrinkage(self, W: np.ndarray) -> typing.Tuple[float, np.ndarray]:
-        r"""
-        Evaluate value and gradient of the shrinkage-regularized score function.
     
-        For the linear least-squares DAGMA objective, the original empirical
-        covariance matrix is replaced by the shrinkage covariance estimator:
-    
-            Q_shrink(W; X)
-            = 1/2 tr((I - W)^T Sigma_shrink (I - W))
-    
-        Gradient:
-    
-            grad Q_shrink(W)
-            = - Sigma_shrink (I - W)
-    
-        Parameters
-        ----------
-        W : np.ndarray
-            (d, d) adjacency matrix.
-    
-        Returns
-        -------
-        typing.Tuple[float, np.ndarray]
-            loss value and gradient of the shrinkage-regularized score.
-        """
-    
-        if self.loss_type == 'l2':
-            if not hasattr(self, "cov_shrink"):
-                raise AttributeError(
-                    "cov_shrink is not defined. "
-                    "Call _compute_ledoit_wolf_shrinkage_cov(X) inside fit() before optimization."
-                )
-    
-            Sigma = self.cov_shrink
-    
-            dif = self.Id - W
-            rhs = Sigma @ dif
-    
-            loss = 0.5 * np.trace(dif.T @ rhs)
-            G_loss = -rhs
-    
-        elif self.loss_type == 'logistic':
-            raise NotImplementedError(
-                "Shrinkage-regularized score is currently defined only for loss_type='l2'. "
-                "For traffic flow data, use DagmaLinear(loss_type='l2')."
-            )
-    
-        return loss, G_loss
-    
-
     def _h(self, W: np.ndarray, s: float = 1.0) -> typing.Tuple[float, np.ndarray]:
         r"""
         Evaluate value and gradient of the logdet acyclicity constraint.
@@ -201,102 +173,191 @@ class DagmaLinear:
         grad = m_hat / (np.sqrt(v_hat) + 1e-8)
         return grad
     
-    def minimize(self, 
-                 W: np.ndarray, 
-                 mu: float, 
-                 max_iter: int, 
-                 s: float, 
-                 lr: float, 
-                 tol: float = 1e-6, 
-                 beta_1: float = 0.99, 
-                 beta_2: float = 0.999, 
-                 pbar: typing.Optional[tqdm] = None,
-                 ) -> typing.Tuple[np.ndarray, bool]:        
+    def minimize(
+            self,
+            W: np.ndarray,
+            mu: float,
+            max_iter: int,
+            s: float,
+            lr: float,
+            tol: float = 1e-6,
+            beta_1: float = 0.99,
+            beta_2: float = 0.999,
+            pbar: typing.Optional[tqdm] = None,
+        ) -> typing.Tuple[np.ndarray, bool]:
         r"""
-        Solves the optimization problem: 
-            .. math::
-                \arg\min_{W \in \mathbb{W}^s} \mu \cdot Q(W; \mathbf{X}) + h(W),
-        where :math:`Q` is the score function. This problem is solved via (sub)gradient descent, where the initial
-        point is `W`.
-
-        Parameters
-        ----------
-        W : np.ndarray
-            Initial point of (sub)gradient descent.
-        mu : float
-            Weights the score function.
-        max_iter : int
-            Maximum number of (sub)gradient iterations.
-        s : float
-            Number that controls the domain of M-matrices.
-        lr : float
-            Learning rate.
-        tol : float, optional
-            Tolerance to admit convergence. Defaults to 1e-6.
-        beta_1 : float, optional
-            Hyperparamter for Adam. Defaults to 0.99.
-        beta_2 : float, optional
-            Hyperparamter for Adam. Defaults to 0.999.
-        pbar : tqdm, optional
-            Controls bar progress. Defaults to ``tqdm()``.
-
-        Returns
-        -------
-        typing.Tuple[np.ndarray, bool]
-            Returns an adjacency matrix until convergence or `max_iter` is reached.
-            A boolean flag is returned to point success of the optimization. This can be False when at any iteration, the current
-            W point went outside of the domain of M-matrices.
+        Solves one inner optimization problem in the DAGMA central path:
+    
+            min_W  mu * (Q(W; X) + lambda1 * ||W||_1) + h_logdet(W)
+    
+        In the SCGL version, Q(W; X) automatically uses the shrinkage covariance
+        if self.cov has already been set to self.cov_shrink inside fit().
         """
-        obj_prev = 1e16
+    
+        obj_prev = np.inf
         self.opt_m, self.opt_v = 0, 0
-        self.vprint(f'\n\nMinimize with -- mu:{mu} -- lr: {lr} -- s: {s} -- l1: {self.lambda1} for {max_iter} max iterations')
-        mask_inc = np.zeros((self.d, self.d))
+    
+        self.vprint(
+            f"\n\nMinimize with -- mu:{mu} -- lr:{lr} -- s:{s} "
+            f"-- l1:{self.lambda1} for {max_iter} max iterations"
+        )
+    
+        # ------------------------------------------------------------------
+        # Mask for forced included edges
+        # ------------------------------------------------------------------
+        mask_inc = np.zeros((self.d, self.d), dtype=self.dtype)
         if self.inc_c is not None:
-            mask_inc[self.inc_r, self.inc_c] = -2 * mu * self.lambda1
+            mask_inc[self.inc_r, self.inc_c] = -2.0 * mu * self.lambda1
+    
+        # ------------------------------------------------------------------
+        # Mask for excluded edges + zero diagonal
+        # ------------------------------------------------------------------
         mask_exc = np.ones((self.d, self.d), dtype=self.dtype)
+    
         if self.exc_c is not None:
-                mask_exc[self.exc_r, self.exc_c] = 0.
-                
-        for iter in range(1, max_iter+1):
-            ## Compute the (sub)gradient of the objective
-            M = sla.inv(s * self.Id - W * W) + 1e-16
-            while np.any(M < 0): # sI - W o W is not an M-matrix
-                if iter == 1 or s <= 0.9:
-                    self.vprint(f'W went out of domain for s={s} at iteration {iter}')
-                    return W, False
-                else:
-                    W += lr * grad
-                    lr *= .5
-                    if lr <= 1e-16:
-                        return W, True
-                    W -= lr * grad
-                    M = sla.inv(s * self.Id - W * W) + 1e-16
-                    self.vprint(f'Learning rate decreased to lr: {lr}')
-            
-            if self.loss_type == 'l2':
-                G_score = -mu * self.cov @ (self.Id - W) 
-            elif self.loss_type == 'logistic':
-                G_score = mu / self.n * self.X.T @ sigmoid(self.X @ W) - mu * self.cov
-            
-            Gobj = G_score + mu * self.lambda1 * np.sign(W) + 2 * W * M.T + mask_inc * np.sign(W)
-            
-            ## Adam step
-            grad = self._adam_update(Gobj, iter, beta_1, beta_2)
-            W -= lr * grad
-            W *= mask_exc
-                
-            ## Check obj convergence
-            if iter % self.checkpoint == 0 or iter == max_iter:
-                obj_new, score, h = self._func(W, mu, s)
-                self.vprint(f'\nInner iteration {iter}')
-                self.vprint(f'\th(W_est): {h:.4e}')
-                self.vprint(f'\tscore(W_est): {score:.4e}')
-                self.vprint(f'\tobj(W_est): {obj_new:.4e}')
-                if np.abs((obj_prev - obj_new) / obj_prev) <= tol:
-                    pbar.update(max_iter-iter+1)
+            mask_exc[self.exc_r, self.exc_c] = 0.0
+    
+        # No self-loops
+        np.fill_diagonal(mask_exc, 0.0)
+    
+        # Make sure the starting point obeys the mask
+        W = W.astype(self.dtype, copy=True)
+        W *= mask_exc
+    
+        # ------------------------------------------------------------------
+        # Helper: check DAGMA M-matrix domain
+        # ------------------------------------------------------------------
+        def _inverse_if_valid(W_current: np.ndarray):
+            """
+            DAGMA requires:
+                sI - W o W
+            to stay inside the M-matrix domain.
+    
+            We use the inverse non-negativity condition as in the original code.
+            """
+            try:
+                M_inv = sla.inv(s * self.Id - W_current * W_current)
+            except Exception:
+                return None
+    
+            if not np.all(np.isfinite(M_inv)):
+                return None
+    
+            # Tiny negative values can happen from numerical noise.
+            if np.any(M_inv < -1e-12):
+                return None
+    
+            return M_inv + 1e-16
+    
+        # ------------------------------------------------------------------
+        # Main optimization loop
+        # ------------------------------------------------------------------
+        for iter_idx in range(1, max_iter + 1):
+    
+            # --------------------------------------------------------------
+            # 1. Check current point is valid and compute inverse
+            # --------------------------------------------------------------
+            M_inv = _inverse_if_valid(W)
+    
+            if M_inv is None:
+                self.vprint(f"W is outside the M-matrix domain for s={s} at iteration {iter_idx}")
+                return W, False
+    
+            # --------------------------------------------------------------
+            # 2. Score gradient
+            #    This is the important part:
+            #    _score uses self.cov.
+            #    If self.cov = self.cov_shrink, then this is SCGL.
+            # --------------------------------------------------------------
+            _, G_loss = self._score(W)
+            G_score = mu * G_loss
+    
+            # --------------------------------------------------------------
+            # 3. Full objective gradient
+            # --------------------------------------------------------------
+            G_h = 2.0 * W * M_inv.T
+    
+            Gobj = (
+                G_score
+                + mu * self.lambda1 * np.sign(W)
+                + G_h
+                + mask_inc * np.sign(W)
+            )
+    
+            if not np.all(np.isfinite(Gobj)):
+                self.vprint(f"Non-finite gradient at iteration {iter_idx}")
+                return W, False
+    
+            # --------------------------------------------------------------
+            # 4. Adam direction
+            # --------------------------------------------------------------
+            grad = self._adam_update(Gobj, iter_idx, beta_1, beta_2)
+    
+            if not np.all(np.isfinite(grad)):
+                self.vprint(f"Non-finite Adam direction at iteration {iter_idx}")
+                return W, False
+    
+            # --------------------------------------------------------------
+            # 5. Backtracking line search to stay inside DAGMA domain
+            # --------------------------------------------------------------
+            step_lr = lr
+            accepted = False
+    
+            while step_lr > 1e-16:
+                W_trial = W - step_lr * grad
+                W_trial *= mask_exc
+    
+                # Numerical safety: no self-loops
+                np.fill_diagonal(W_trial, 0.0)
+    
+                M_trial_inv = _inverse_if_valid(W_trial)
+    
+                if M_trial_inv is not None:
+                    W = W_trial
+                    accepted = True
                     break
+    
+                step_lr *= 0.5
+    
+            if not accepted:
+                self.vprint(
+                    f"Could not find a valid step at iteration {iter_idx}; "
+                    f"last step_lr={step_lr:.2e}"
+                )
+                return W, True
+    
+            # --------------------------------------------------------------
+            # 6. Check convergence
+            # --------------------------------------------------------------
+            if iter_idx % self.checkpoint == 0 or iter_idx == max_iter:
+                obj_new, score, h = self._func(W, mu, s)
+    
+                self.vprint(f"\nInner iteration {iter_idx}")
+                self.vprint(f"\th(W_est): {h:.4e}")
+                self.vprint(f"\tscore(W_est): {score:.4e}")
+                self.vprint(f"\tobj(W_est): {obj_new:.4e}")
+                self.vprint(f"\tstep_lr: {step_lr:.4e}")
+    
+                if not np.isfinite(obj_new):
+                    self.vprint(f"Non-finite objective at iteration {iter_idx}")
+                    return W, False
+    
+                if np.isfinite(obj_prev):
+                    rel_change = abs(obj_prev - obj_new) / max(abs(obj_prev), 1.0)
+    
+                    if rel_change <= tol:
+                        if pbar is not None:
+                            pbar.update(max_iter - iter_idx + 1)
+                        break
+    
                 obj_prev = obj_new
-            pbar.update(1)
+    
+            if pbar is not None:
+                pbar.update(1)
+    
+        W *= mask_exc
+        np.fill_diagonal(W, 0.0)
+    
         return W, True
     
     def fit(self, 
