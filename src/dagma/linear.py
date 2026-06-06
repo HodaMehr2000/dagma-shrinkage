@@ -392,7 +392,10 @@ class DagmaLinear:
             else:
                 ValueError("whitelist should be a tuple of edges, e.g., ((1,2), (2,3))")        
             
-        self.cov = X.T @ X / float(self.n)    
+        #self.cov = X.T @ X / float(self.n) 
+        self.cov = X.T @ X / float(self.n) #updated
+        self.cov_shrink = self._compute_ledoit_wolf_shrinkage_cov(self.X)  #updated
+        self.cov = self.cov_shrink    #updated
         self.W_est = np.zeros((self.d,self.d)).astype(self.dtype) # init W0 at zero matrix
         mu = mu_init
         if type(s) == list:
