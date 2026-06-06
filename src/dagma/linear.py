@@ -552,22 +552,110 @@ class DagmaLinear:
 def test():
     from . import utils
     from timeit import default_timer as timer
+
     utils.set_random_seed(1)
-    
-    n, d, s0 = 500, 20, 20 # the ground truth is a DAG of 20 nodes and 20 edges in expectation
+
+    # ------------------------------------------------------------
+    # Synthetic DAG data
+    # ------------------------------------------------------------
+    n, d, s0 = 500, 20, 20
     graph_type, sem_type = 'ER', 'gauss'
-    
+
     B_true = utils.simulate_dag(d, s0, graph_type)
     W_true = utils.simulate_parameter(B_true)
     X = utils.simulate_linear_sem(W_true, n, sem_type)
-    
-    model = DagmaLinear(loss_type='l2')
+
+    lambda1 = 0.02
+
+    print("=" * 80)
+    print("Testing DAGMA vs SCGL-DAGMA")
+    print(f"n={n}, d={d}, expected_edges={s0}, graph_type={graph_type}, sem_type={sem_type}")
+    print("=" * 80)
+
+    # ------------------------------------------------------------
+    # 1. Standard DAGMA: empirical/sample covariance
+    # ------------------------------------------------------------
+    model_std = DagmaLinear(loss_type='l2', verbose=False)
+
     start = timer()
-    W_est = model.fit(X, lambda1=0.02)
-    end = timer()
-    acc = utils.count_accuracy(B_true, W_est != 0)
-    print(acc)
-    print(f'time: {end-start:.4f}s')
+    W_std = model_std.fit(
+        X.copy(),
+        lambda1=lambda1,
+        use_shrinkage=False
+    )
+    time_std = timer() - start
+
+    acc_std = utils.count_accuracy(B_true, W_std != 0)
+
+    print("\n[1] Standard DAGMA")
+    print("-" * 80)
+    print(f"time: {time_std:.4f}s")
+    print(f"h_final: {model_std.h_final:.4e}")
+    print(f"score_final: {model_std.score_final:.4e}")
+    print(f"condition number sample covariance: {model_std.cond_sample:.4e}")
+    print("accuracy:")
+    print(acc_std)
+
+    # ------------------------------------------------------------
+    # 2. SCGL-DAGMA: Ledoit-Wolf shrinkage covariance
+    # ------------------------------------------------------------
+    model_scgl = DagmaLinear(loss_type='l2', verbose=False)
+
+    start = timer()
+    W_scgl = model_scgl.fit(
+        X.copy(),
+        lambda1=lambda1,
+        use_shrinkage=True
+    )
+    time_scgl = timer() - start
+
+    acc_scgl = utils.count_accuracy(B_true, W_scgl != 0)
+
+    print("\n[2] SCGL-DAGMA with Ledoit-Wolf shrinkage")
+    print("-" * 80)
+    print(f"time: {time_scgl:.4f}s")
+    print(f"h_final: {model_scgl.h_final:.4e}")
+    print(f"score_final: {model_scgl.score_final:.4e}")
+    print(f"shrinkage rho: {model_scgl.shrinkage_rho:.6f}")
+    print(f"condition number sample covariance:   {model_scgl.cond_sample:.4e}")
+    print(f"condition number shrinkage covariance:{model_scgl.cond_shrink:.4e}")
+    print(f"condition improvement: {model_scgl.cond_sample / model_scgl.cond_shrink:.2f}x")
+    print("accuracy:")
+    print(acc_scgl)
+
+    # ------------------------------------------------------------
+    # 3. Compact comparison
+    # ------------------------------------------------------------
+    print("\n[3] Summary")
+    print("=" * 80)
+    print(f"{'Method':<20} {'Time(s)':>12} {'h_final':>14} {'Score':>14} {'Edges':>10}")
+    print("-" * 80)
+    print(
+        f"{'DAGMA':<20} "
+        f"{time_std:>12.4f} "
+        f"{model_std.h_final:>14.4e} "
+        f"{model_std.score_final:>14.4e} "
+        f"{int((W_std != 0).sum()):>10}"
+    )
+    print(
+        f"{'SCGL-DAGMA':<20} "
+        f"{time_scgl:>12.4f} "
+        f"{model_scgl.h_final:>14.4e} "
+        f"{model_scgl.score_final:>14.4e} "
+        f"{int((W_scgl != 0).sum()):>10}"
+    )
+    print("=" * 80)
+
+    return {
+        "W_std": W_std,
+        "W_scgl": W_scgl,
+        "acc_std": acc_std,
+        "acc_scgl": acc_scgl,
+        "time_std": time_std,
+        "time_scgl": time_scgl,
+        "model_std": model_std,
+        "model_scgl": model_scgl,
+    }
     
 if __name__ == '__main__':
     test()
