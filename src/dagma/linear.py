@@ -2,6 +2,7 @@ import numpy as np
 import scipy.linalg as sla
 import numpy.linalg as la
 from scipy.special import expit as sigmoid
+from sklearn.covariance import LedoitWolf
 from tqdm.auto import tqdm
 import typing
 
@@ -58,6 +59,76 @@ class DagmaLinear:
             loss = 1.0 / self.n * (np.logaddexp(0, R) - self.X * R).sum()
             G_loss = (1.0 / self.n * self.X.T) @ sigmoid(R) - self.cov
         return loss, G_loss
+
+    def _compute_ledoit_wolf_shrinkage_cov(self, X: np.ndarray) -> np.ndarray:
+        """
+        Compute Ledoit-Wolf shrinkage covariance using sklearn.
+    
+        X must already be centered.
+        """
+    
+        X = np.asarray(X, dtype=self.dtype)
+    
+        sample_cov = (X.T @ X) / float(X.shape[0])
+    
+        lw = LedoitWolf().fit(X)
+    
+        self.cov_sample = sample_cov.astype(self.dtype)
+        self.cov_shrink = lw.covariance_.astype(self.dtype)
+        self.shrinkage_rho = float(lw.shrinkage_)
+        self.shrinkage_mu = float(np.trace(sample_cov) / sample_cov.shape[0])
+    
+        return self.cov_shrink
+    
+    def _scoreshrinkage(self, W: np.ndarray) -> typing.Tuple[float, np.ndarray]:
+        r"""
+        Evaluate value and gradient of the shrinkage-regularized score function.
+    
+        For the linear least-squares DAGMA objective, the original empirical
+        covariance matrix is replaced by the shrinkage covariance estimator:
+    
+            Q_shrink(W; X)
+            = 1/2 tr((I - W)^T Sigma_shrink (I - W))
+    
+        Gradient:
+    
+            grad Q_shrink(W)
+            = - Sigma_shrink (I - W)
+    
+        Parameters
+        ----------
+        W : np.ndarray
+            (d, d) adjacency matrix.
+    
+        Returns
+        -------
+        typing.Tuple[float, np.ndarray]
+            loss value and gradient of the shrinkage-regularized score.
+        """
+    
+        if self.loss_type == 'l2':
+            if not hasattr(self, "cov_shrink"):
+                raise AttributeError(
+                    "cov_shrink is not defined. "
+                    "Call _compute_ledoit_wolf_shrinkage_cov(X) inside fit() before optimization."
+                )
+    
+            Sigma = self.cov_shrink
+    
+            dif = self.Id - W
+            rhs = Sigma @ dif
+    
+            loss = 0.5 * np.trace(dif.T @ rhs)
+            G_loss = -rhs
+    
+        elif self.loss_type == 'logistic':
+            raise NotImplementedError(
+                "Shrinkage-regularized score is currently defined only for loss_type='l2'. "
+                "For traffic flow data, use DagmaLinear(loss_type='l2')."
+            )
+    
+        return loss, G_loss
+    
 
     def _h(self, W: np.ndarray, s: float = 1.0) -> typing.Tuple[float, np.ndarray]:
         r"""
