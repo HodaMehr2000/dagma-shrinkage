@@ -360,133 +360,193 @@ class DagmaLinear:
     
         return W, True
     
-    def fit(self, 
+    def fit(
+            self,
             X: np.ndarray,
-            lambda1: float = 0.03, 
-            w_threshold: float = 0.3, 
+            lambda1: float = 0.03,
+            w_threshold: float = 0.3,
             T: int = 5,
-            mu_init: float = 1.0, 
-            mu_factor: float = 0.1, 
-            s: typing.Union[typing.List[float], float] = [1.0, .9, .8, .7, .6], 
-            warm_iter: int = 3e4, 
-            max_iter: int = 6e4, 
-            lr: float = 0.0003, 
-            checkpoint: int = 1000, 
-            beta_1: float = 0.99, 
+            mu_init: float = 1.0,
+            mu_factor: float = 0.1,
+            s: typing.Union[typing.List[float], float] = [1.0, .9, .8, .7, .6],
+            warm_iter: int = 3e4,
+            max_iter: int = 6e4,
+            lr: float = 0.0003,
+            checkpoint: int = 1000,
+            beta_1: float = 0.99,
             beta_2: float = 0.999,
-            exclude_edges: typing.Optional[typing.List[typing.Tuple[int, int]]] = None, 
+            exclude_edges: typing.Optional[typing.List[typing.Tuple[int, int]]] = None,
             include_edges: typing.Optional[typing.List[typing.Tuple[int, int]]] = None,
-        ) -> np.ndarray :
-        r"""
-        Runs the DAGMA algorithm and returns a weighted adjacency matrix.
-
-        Parameters
-        ----------
-        X : np.ndarray
-            :math:`(n,d)` dataset.
-        lambda1 : float
-            Coefficient of the L1 penalty. Defaults to 0.03.
-        w_threshold : float, optional
-            Removes edges with weight value less than the given threshold. Defaults to 0.3.
-        T : int, optional
-            Number of DAGMA iterations. Defaults to 5.
-        mu_init : float, optional
-            Initial value of :math:`\mu`. Defaults to 1.0.
-        mu_factor : float, optional
-            Decay factor for :math:`\mu`. Defaults to 0.1.
-        s : typing.Union[typing.List[float], float], optional
-            Controls the domain of M-matrices. Defaults to [1.0, .9, .8, .7, .6].
-        warm_iter : int, optional
-            Number of iterations for :py:meth:`~dagma.linear.DagmaLinear.minimize` for :math:`t < T`. Defaults to 3e4.
-        max_iter : int, optional
-            Number of iterations for :py:meth:`~dagma.linear.DagmaLinear.minimize` for :math:`t = T`. Defaults to 6e4.
-        lr : float, optional
-            Learning rate. Defaults to 0.0003.
-        checkpoint : int, optional
-            If ``verbose`` is ``True``, then prints to stdout every ``checkpoint`` iterations. Defaults to 1000.
-        beta_1 : float, optional
-            Adam hyperparameter. Defaults to 0.99.
-        beta_2 : float, optional
-            Adam hyperparameter. Defaults to 0.999.
-        exclude_edges : typing.Optional[typing.List[typing.Tuple[int, int]]], optional
-            Tuple of edges that should be excluded from the DAG solution, e.g., ``((1,3), (2,4), (5,1))``. Defaults to None.
-        include_edges : typing.Optional[typing.List[typing.Tuple[int, int]]], optional
-            Tuple of edges that should be included from the DAG solution, e.g., ``((1,3), (2,4), (5,1))``. Defaults to None.
-
-        Returns
-        -------
-        np.ndarray
-            Estimated DAG from data.
-        
-        
-        .. important::
-
-            If the output of :py:meth:`~dagma.linear.DagmaLinear.fit` is not a DAG, then the user should try larger values of ``T`` (e.g., 6, 7, or 8) 
-            before raising an issue in github.
-        
-        .. warning::
-            
-            While DAGMA ensures to exclude the edges given in ``exclude_edges``, the current implementation does not guarantee that all edges
-            in ``included edges`` will be part of the final DAG.
-        """ 
-        
-        ## INITALIZING VARIABLES 
-        self.X, self.lambda1, self.checkpoint = X, lambda1, checkpoint
-        self.n, self.d = X.shape
-        self.Id = np.eye(self.d).astype(self.dtype)
-        
+            use_shrinkage: bool = True,
+        ) -> np.ndarray:
+        """
+        Runs DAGMA and returns a weighted adjacency matrix.
+    
+        If use_shrinkage=True and loss_type='l2', the empirical covariance
+        in the least-squares score is replaced by Ledoit-Wolf shrinkage covariance.
+        """
+    
+        # ------------------------------------------------------------
+        # Initialize variables safely
+        # ------------------------------------------------------------
+        self.X = np.asarray(X, dtype=self.dtype).copy()
+        self.lambda1 = lambda1
+        self.checkpoint = checkpoint
+    
+        self.n, self.d = self.X.shape
+        self.Id = np.eye(self.d, dtype=self.dtype)
+    
+        # ------------------------------------------------------------
+        # Center data for l2 loss, matching DAGMA linear behavior
+        # ------------------------------------------------------------
         if self.loss_type == 'l2':
-            self.X -= X.mean(axis=0, keepdims=True)
-        
+            self.X -= self.X.mean(axis=0, keepdims=True)
+    
+        # ------------------------------------------------------------
+        # Edge constraints
+        # ------------------------------------------------------------
         self.exc_r, self.exc_c = None, None
         self.inc_r, self.inc_c = None, None
-        
+    
         if exclude_edges is not None:
-            if type(exclude_edges) is tuple and type(exclude_edges[0]) is tuple and np.all(np.array([len(e) for e in exclude_edges]) == 2):
+            if (
+                isinstance(exclude_edges, tuple)
+                and len(exclude_edges) > 0
+                and isinstance(exclude_edges[0], tuple)
+                and np.all(np.array([len(e) for e in exclude_edges]) == 2)
+            ):
                 self.exc_r, self.exc_c = zip(*exclude_edges)
             else:
-                ValueError("blacklist should be a tuple of edges, e.g., ((1,2), (2,3))")
-        
+                raise ValueError(
+                    "exclude_edges should be a tuple of edges, e.g., ((1,2), (2,3))"
+                )
+    
         if include_edges is not None:
-            if type(include_edges) is tuple and type(include_edges[0]) is tuple and np.all(np.array([len(e) for e in include_edges]) == 2):
+            if (
+                isinstance(include_edges, tuple)
+                and len(include_edges) > 0
+                and isinstance(include_edges[0], tuple)
+                and np.all(np.array([len(e) for e in include_edges]) == 2)
+            ):
                 self.inc_r, self.inc_c = zip(*include_edges)
             else:
-                ValueError("whitelist should be a tuple of edges, e.g., ((1,2), (2,3))")        
-            
-        #self.cov = X.T @ X / float(self.n) 
-        self.cov = X.T @ X / float(self.n) #updated
-        self.cov_shrink = self._compute_ledoit_wolf_shrinkage_cov(self.X)  #updated
-        self.cov = self.cov_shrink    #updated
-        self.W_est = np.zeros((self.d,self.d)).astype(self.dtype) # init W0 at zero matrix
+                raise ValueError(
+                    "include_edges should be a tuple of edges, e.g., ((1,2), (2,3))"
+                )
+    
+        # ------------------------------------------------------------
+        # Covariance choice: standard DAGMA vs SCGL-DAGMA
+        # ------------------------------------------------------------
+        if self.loss_type == 'l2':
+            self.cov_sample = (self.X.T @ self.X) / float(self.n)
+            self.cond_sample = self._condition_number(self.cov_sample)
+    
+            if use_shrinkage:
+                self.cov = self._compute_ledoit_wolf_shrinkage_cov(self.X)
+                self.use_shrinkage = True
+    
+                self.vprint(
+                    f"Using Ledoit-Wolf shrinkage covariance | "
+                    f"rho={self.shrinkage_rho:.6f}, "
+                    f"cond(sample)={self.cond_sample:.4e}, "
+                    f"cond(shrink)={self.cond_shrink:.4e}, "
+                    f"improvement={self.cond_sample / self.cond_shrink:.2f}x"
+                )
+            else:
+                self.cov = self.cov_sample
+                self.cov_shrink = None
+                self.shrinkage_rho = 0.0
+                self.shrinkage_mu = float(np.trace(self.cov_sample) / self.d)
+                self.cond_shrink = None
+                self.use_shrinkage = False
+    
+                self.vprint(
+                    f"Using empirical covariance | "
+                    f"cond(sample)={self.cond_sample:.4e}"
+                )
+    
+        elif self.loss_type == 'logistic':
+            self.cov = (self.X.T @ self.X) / float(self.n)
+            self.use_shrinkage = False
+    
+            if use_shrinkage:
+                self.vprint(
+                    "Warning: use_shrinkage=True was ignored because "
+                    "shrinkage covariance is only used for loss_type='l2'."
+                )
+    
+        # ------------------------------------------------------------
+        # Initialize W at zero matrix
+        # ------------------------------------------------------------
+        self.W_est = np.zeros((self.d, self.d), dtype=self.dtype)
         mu = mu_init
-        if type(s) == list:
-            if len(s) < T: 
-                self.vprint(f"Length of s is {len(s)}, using last value in s for iteration t >= {len(s)}")
+    
+        # ------------------------------------------------------------
+        # Prepare s schedule
+        # ------------------------------------------------------------
+        if isinstance(s, list):
+            if len(s) < T:
+                self.vprint(
+                    f"Length of s is {len(s)}, using last value in s "
+                    f"for iteration t >= {len(s)}"
+                )
                 s = s + (T - len(s)) * [s[-1]]
-        elif type(s) in [int, float]:
+    
+        elif isinstance(s, (int, float)):
             s = T * [s]
+    
         else:
-            ValueError("s should be a list, int, or float.")    
-        
-        ## START DAGMA
-        with tqdm(total=(T-1)*warm_iter+max_iter) as pbar:
+            raise ValueError("s should be a list, int, or float.")
+    
+        # ------------------------------------------------------------
+        # Start DAGMA central path
+        # ------------------------------------------------------------
+        with tqdm(total=(T - 1) * int(warm_iter) + int(max_iter)) as pbar:
             for i in range(int(T)):
-                self.vprint(f'\nIteration -- {i+1}:')
-                lr_adam, success = lr, False
+                self.vprint(f"\nIteration -- {i + 1}:")
+    
+                lr_adam = lr
+                success = False
                 inner_iters = int(max_iter) if i == T - 1 else int(warm_iter)
+    
                 while success is False:
-                    W_temp, success = self.minimize(self.W_est.copy(), mu, inner_iters, s[i], lr=lr_adam, beta_1=beta_1, beta_2=beta_2, pbar=pbar)
+                    W_temp, success = self.minimize(
+                        self.W_est.copy(),
+                        mu,
+                        inner_iters,
+                        s[i],
+                        lr=lr_adam,
+                        beta_1=beta_1,
+                        beta_2=beta_2,
+                        pbar=pbar,
+                    )
+    
                     if success is False:
-                        self.vprint(f'Retrying with larger s')
+                        self.vprint("Retrying with larger s and smaller learning rate")
                         lr_adam *= 0.5
                         s[i] += 0.1
+    
                 self.W_est = W_temp
                 mu *= mu_factor
-        
-        ## Store final h and score values and threshold
+    
+        # ------------------------------------------------------------
+        # Store pre-threshold values
+        # ------------------------------------------------------------
+        self.h_before_threshold, _ = self._h(self.W_est)
+        self.score_before_threshold, _ = self._score(self.W_est)
+    
+        # ------------------------------------------------------------
+        # Threshold weak edges
+        # ------------------------------------------------------------
+        self.W_est[np.abs(self.W_est) < w_threshold] = 0.0
+        np.fill_diagonal(self.W_est, 0.0)
+    
+        # ------------------------------------------------------------
+        # Store final values after threshold
+        # ------------------------------------------------------------
         self.h_final, _ = self._h(self.W_est)
         self.score_final, _ = self._score(self.W_est)
-        self.W_est[np.abs(self.W_est) < w_threshold] = 0
+    
         return self.W_est
 
 def test():
