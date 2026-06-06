@@ -444,6 +444,8 @@ class DagmaLinear:
             if use_shrinkage:
                 self.cov = self._compute_ledoit_wolf_shrinkage_cov(self.X)
                 self.use_shrinkage = True
+            else:
+                self.cov = self.cov_sample
     
                 self.vprint(
                     f"Using Ledoit-Wolf shrinkage covariance | "
