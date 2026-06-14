@@ -4,6 +4,7 @@ import numpy.linalg as la
 from scipy.special import expit as sigmoid
 from tqdm.auto import tqdm
 import typing
+from sklearn.covariance import LedoitWolf
 
 
 __all__ = ["DagmaLinear"]
