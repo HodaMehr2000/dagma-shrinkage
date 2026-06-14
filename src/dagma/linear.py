@@ -60,6 +60,67 @@ class DagmaLinear:
             G_loss = (1.0 / self.n * self.X.T) @ sigmoid(R) - self.cov
         return loss, G_loss
 
+
+
+        def _condition_number(self, A: np.ndarray, eps: float = 1e-12) -> float:
+        """
+        Compute spectral condition number of a covariance matrix.
+        """
+        eigvals = np.linalg.eigvalsh(A)
+        lam_max = float(np.max(eigvals))
+        lam_min = float(np.min(eigvals))
+        lam_min = max(lam_min, eps)
+        return lam_max / lam_min
+###updated###
+    def _set_covariance(self, use_shrinkage: bool = False, print_method: bool = True) -> None:
+        """
+        Set the covariance matrix used in the l2 DAGMA score.
+
+        use_shrinkage=False:
+            Standard DAGMA uses empirical covariance.
+
+        use_shrinkage=True:
+            SCGL-DAGMA uses Ledoit-Wolf shrinkage covariance.
+        """
+        self.cov_sample = self.X.T @ self.X / float(self.n)
+        self.cond_sample = self._condition_number(self.cov_sample)
+
+        if self.loss_type == 'l2' and use_shrinkage:
+            lw = LedoitWolf().fit(self.X)
+            self.cov_shrink = lw.covariance_.astype(self.dtype)
+            self.shrinkage_rho = float(lw.shrinkage_)
+            self.cond_shrink = self._condition_number(self.cov_shrink)
+
+            self.cov = self.cov_shrink
+            self.use_shrinkage = True
+            self.method_name = "SCGL-DAGMA"
+
+            if print_method:
+                print("=" * 80)
+                print("Graph learning method: SCGL-DAGMA")
+                print("Covariance used in l2 score: Ledoit-Wolf shrinkage covariance")
+                print(f"Shrinkage rho: {self.shrinkage_rho:.6f}")
+                print(f"Condition number sample covariance:    {self.cond_sample:.4e}")
+                print(f"Condition number shrinkage covariance: {self.cond_shrink:.4e}")
+                print(f"Condition improvement: {self.cond_sample / self.cond_shrink:.2f}x")
+                print("=" * 80)
+
+        else:
+            self.cov = self.cov_sample
+            self.cov_shrink = None
+            self.shrinkage_rho = 0.0
+            self.cond_shrink = None
+            self.use_shrinkage = False
+            self.method_name = "Standard DAGMA"
+
+            if print_method:
+                print("=" * 80)
+                print("Graph learning method: Standard DAGMA")
+                print("Covariance used in l2 score: empirical/sample covariance")
+                print(f"Condition number sample covariance: {self.cond_sample:.4e}")
+                print("=" * 80)
+    ##updated##            
+    
     def _h(self, W: np.ndarray, s: float = 1.0) -> typing.Tuple[float, np.ndarray]:
         r"""
         Evaluate value and gradient of the logdet acyclicity constraint.
@@ -245,6 +306,8 @@ class DagmaLinear:
             beta_2: float = 0.999,
             exclude_edges: typing.Optional[typing.List[typing.Tuple[int, int]]] = None, 
             include_edges: typing.Optional[typing.List[typing.Tuple[int, int]]] = None,
+            use_shrinkage: bool = False,
+            print_method: bool = True,
         ) -> np.ndarray :
         r"""
         Runs the DAGMA algorithm and returns a weighted adjacency matrix.
@@ -300,12 +363,17 @@ class DagmaLinear:
         """ 
         
         ## INITALIZING VARIABLES 
-        self.X, self.lambda1, self.checkpoint = X, lambda1, checkpoint
-        self.n, self.d = X.shape
+        #self.X, self.lambda1, self.checkpoint = X, lambda1, checkpoint
+        self.X = np.asarray(X, dtype=self.dtype).copy()
+        self.lambda1 = lambda1
+        self.checkpoint = checkpoint
+        #self.n, self.d = X.shape
+        self.n, self.d = self.X.shape
         self.Id = np.eye(self.d).astype(self.dtype)
         
         if self.loss_type == 'l2':
-            self.X -= X.mean(axis=0, keepdims=True)
+            #self.X -= X.mean(axis=0, keepdims=True)
+            self.X -= self.X.mean(axis=0, keepdims=True)
         
         self.exc_r, self.exc_c = None, None
         self.inc_r, self.inc_c = None, None
@@ -322,7 +390,11 @@ class DagmaLinear:
             else:
                 ValueError("whitelist should be a tuple of edges, e.g., ((1,2), (2,3))")        
             
-        self.cov = X.T @ X / float(self.n)    
+        #self.cov = X.T @ X / float(self.n)
+        self._set_covariance(
+            use_shrinkage=use_shrinkage,
+            print_method=print_method
+                            )
         self.W_est = np.zeros((self.d,self.d)).astype(self.dtype) # init W0 at zero matrix
         mu = mu_init
         if type(s) == list:
