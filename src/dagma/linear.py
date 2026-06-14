@@ -9,169 +9,199 @@ import typing
 
 __all__ = ["DagmaLinear"]
 
+
 class DagmaLinear:
     """
-    A Python object that contains the implementation of DAGMA for linear models using numpy and scipy.
+    DAGMA for linear models.
+
+    This version supports two covariance modes for loss_type='l2':
+
+        1. empirical covariance:
+           standard DAGMA
+
+        2. Ledoit-Wolf shrinkage covariance:
+           SCGL-DAGMA
     """
-    
-    def __init__(self, loss_type: str, verbose: bool = False, dtype: type = np.float64) -> None:
-        r"""
-        Parameters
-        ----------
-        loss_type : str
-            One of ["l2", "logistic"]. ``l2`` refers to the least squares loss, while ``logistic``
-            refers to the logistic loss. For continuous data: use ``l2``. For discrete 0/1 data: use ``logistic``.
-        verbose : bool, optional
-            If true, the loss/score and h values will print to stdout every ``checkpoint`` iterations,
-            as defined in :py:meth:`~dagma.linear.DagmaLinear.fit`. Defaults to ``False``.
-        dtype : type, optional
-           Defines the float precision, for large number of nodes it is recommened to use ``np.float64``. 
-           Defaults to ``np.float64``.
-        """
-        super().__init__()
-        losses = ['l2', 'logistic']
-        assert loss_type in losses, f"loss_type should be one of {losses}"
+
+    def __init__(
+        self,
+        loss_type: str,
+        verbose: bool = False,
+        dtype: type = np.float64,
+    ) -> None:
+        losses = ["l2", "logistic"]
+        if loss_type not in losses:
+            raise ValueError(f"loss_type should be one of {losses}")
+
         self.loss_type = loss_type
         self.dtype = dtype
+        self.verbose = verbose
         self.vprint = print if verbose else lambda *a, **k: None
-            
+
     def _score(self, W: np.ndarray) -> typing.Tuple[float, np.ndarray]:
-        r"""
-        Evaluate value and gradient of the score function.
-    
-        In the l2 case, self.cov is either:
-            - empirical covariance, for standard DAGMA
-            - shrinkage covariance, for SCGL/DAGMA-shrinkage
         """
-        if self.loss_type == 'l2':
+        Evaluate score value and gradient.
+
+        For loss_type='l2', self.cov determines the method:
+
+            self.cov = empirical covariance   -> standard DAGMA
+            self.cov = shrinkage covariance   -> SCGL-DAGMA
+        """
+
+        if self.loss_type == "l2":
             dif = self.Id - W
             rhs = self.cov @ dif
+
             loss = 0.5 * np.trace(dif.T @ rhs)
             G_loss = -rhs
-    
-        elif self.loss_type == 'logistic':
+
+        elif self.loss_type == "logistic":
             R = self.X @ W
-            loss = 1.0 / self.n * (np.logaddexp(0, R) - self.X * R).sum()
-            G_loss = (1.0 / self.n * self.X.T) @ sigmoid(R) - self.cov
-    
+
+            loss = (np.logaddexp(0, R) - self.X * R).sum() / float(self.n)
+            G_loss = ((self.X.T @ sigmoid(R)) / float(self.n)) - self.cov
+
+        else:
+            raise ValueError(f"Unknown loss_type: {self.loss_type}")
+
         return loss, G_loss
 
     def _condition_number(self, A: np.ndarray, eps: float = 1e-12) -> float:
         """
-        Compute spectral condition number for a symmetric covariance matrix.
+        Spectral condition number for symmetric covariance matrices.
         """
         eigvals = np.linalg.eigvalsh(A)
+
         lam_max = float(np.max(eigvals))
         lam_min = float(np.min(eigvals))
+
         lam_min = max(lam_min, eps)
+
         return lam_max / lam_min
 
-    def _compute_ledoit_wolf_shrinkage_cov(self, X: np.ndarray) -> np.ndarray:
+    def _prepare_covariance(self, use_shrinkage: bool) -> None:
         """
-        Compute Ledoit-Wolf shrinkage covariance.
-    
-        X must already be centered.
-    
-        This function stores:
-            self.cov_sample
-            self.cov_shrink
-            self.shrinkage_rho
-            self.shrinkage_mu
-            self.cond_sample
-            self.cond_shrink
-    
-        and returns:
-            shrinkage covariance matrix
+        Prepare covariance matrix used in the score function.
+
+        For l2:
+            - empirical covariance is always computed
+            - shrinkage covariance is optionally computed
+
+        For logistic:
+            - shrinkage is ignored
         """
-        X = np.asarray(X, dtype=self.dtype)
-        n, d = X.shape
-    
-        sample_cov = (X.T @ X) / float(n)
-    
-        lw = LedoitWolf().fit(X)
-        shrink_cov = lw.covariance_.astype(self.dtype)
-    
-        self.cov_sample = sample_cov.astype(self.dtype)
-        self.cov_shrink = shrink_cov
-        self.shrinkage_rho = float(lw.shrinkage_)
-        self.shrinkage_mu = float(np.trace(sample_cov) / d)
-    
+
+        self.cov_sample = (self.X.T @ self.X) / float(self.n)
         self.cond_sample = self._condition_number(self.cov_sample)
-        self.cond_shrink = self._condition_number(self.cov_shrink)
-    
-        return self.cov_shrink
-    
-    
-    def _h(self, W: np.ndarray, s: float = 1.0) -> typing.Tuple[float, np.ndarray]:
-        r"""
-        Evaluate value and gradient of the logdet acyclicity constraint.
 
-        Parameters
-        ----------
-        W : np.ndarray
-            :math:`(d,d)` adjacency matrix
-        s : float, optional
-            Controls the domain of M-matrices. Defaults to 1.0.
+        if self.loss_type == "l2" and use_shrinkage:
+            lw = LedoitWolf().fit(self.X)
 
-        Returns
-        -------
-        typing.Tuple[float, np.ndarray]
-            h value, and gradient of h
+            self.cov_shrink = lw.covariance_.astype(self.dtype)
+            self.shrinkage_rho = float(lw.shrinkage_)
+            self.shrinkage_mu = float(np.trace(self.cov_sample) / self.d)
+            self.cond_shrink = self._condition_number(self.cov_shrink)
+
+            self.cov = self.cov_shrink
+            self.use_shrinkage = True
+            self.method_name = "SCGL-DAGMA"
+
+        else:
+            self.cov_shrink = None
+            self.shrinkage_rho = 0.0
+            self.shrinkage_mu = float(np.trace(self.cov_sample) / self.d)
+            self.cond_shrink = None
+
+            self.cov = self.cov_sample
+            self.use_shrinkage = False
+
+            if self.loss_type == "l2":
+                self.method_name = "Standard DAGMA"
+            else:
+                self.method_name = "DAGMA Logistic"
+
+    def _print_method_info(self) -> None:
         """
+        Print which graph-learning method is being used.
+        """
+
+        print("=" * 80)
+        print(f"Graph learning method: {self.method_name}")
+        print(f"Loss type: {self.loss_type}")
+
+        if self.loss_type == "l2":
+            if self.use_shrinkage:
+                print("Covariance used in l2 score: Ledoit-Wolf shrinkage covariance")
+                print(f"Shrinkage rho: {self.shrinkage_rho:.6f}")
+                print(f"Condition number sample covariance:    {self.cond_sample:.4e}")
+                print(f"Condition number shrinkage covariance: {self.cond_shrink:.4e}")
+                print(f"Condition improvement: {self.cond_sample / self.cond_shrink:.2f}x")
+            else:
+                print("Covariance used in l2 score: empirical/sample covariance")
+                print(f"Condition number sample covariance: {self.cond_sample:.4e}")
+        else:
+            print("Shrinkage covariance: not used for logistic loss")
+
+        print("=" * 80)
+
+    def _h(
+        self,
+        W: np.ndarray,
+        s: float = 1.0,
+    ) -> typing.Tuple[float, np.ndarray]:
+        """
+        Log-det acyclicity function and gradient.
+        """
+
         M = s * self.Id - W * W
-        h = - la.slogdet(M)[1] + self.d * np.log(s)
-        G_h = 2 * W * sla.inv(M).T 
+
+        sign, logdet = la.slogdet(M)
+
+        if sign <= 0:
+            return np.inf, np.full_like(W, np.nan)
+
+        h = -logdet + self.d * np.log(s)
+        G_h = 2.0 * W * sla.inv(M).T
+
         return h, G_h
 
-    def _func(self, W: np.ndarray, mu: float, s: float = 1.0) -> typing.Tuple[float, np.ndarray]:
-        r"""
-        Evaluate value of the penalized objective function.
-
-        Parameters
-        ----------
-        W : np.ndarray
-            :math:`(d,d)` adjacency matrix
-        mu : float
-            Weight of the score function.
-        s : float, optional
-            Controls the domain of M-matrices. Defaults to 1.0.
-
-        Returns
-        -------
-        typing.Tuple[float, np.ndarray]
-            Objective value, and gradient of the objective
+    def _func(
+        self,
+        W: np.ndarray,
+        mu: float,
+        s: float = 1.0,
+    ) -> typing.Tuple[float, float, float]:
         """
+        Full DAGMA objective:
+
+            mu * (score + lambda1 * ||W||_1) + h(W)
+        """
+
         score, _ = self._score(W)
         h, _ = self._h(W, s)
-        obj = mu * (score + self.lambda1 * np.abs(W).sum()) + h 
+
+        obj = mu * (score + self.lambda1 * np.abs(W).sum()) + h
+
         return obj, score, h
-    
-    def _adam_update(self, grad: np.ndarray, iter: int, beta_1: float, beta_2: float) -> np.ndarray:
-        r"""
-        Performs one update of Adam.
 
-        Parameters
-        ----------
-        grad : np.ndarray
-            Current gradient of the objective.
-        iter : int
-            Current iteration number.
-        beta_1 : float
-            Adam hyperparameter.
-        beta_2 : float
-            Adam hyperparameter.
-
-        Returns
-        -------
-        np.ndarray
-            Updates the gradient by the Adam method.
+    def _adam_update(
+        self,
+        grad: np.ndarray,
+        iter_idx: int,
+        beta_1: float,
+        beta_2: float,
+    ) -> np.ndarray:
         """
-        self.opt_m = self.opt_m * beta_1 + (1 - beta_1) * grad
-        self.opt_v = self.opt_v * beta_2 + (1 - beta_2) * (grad ** 2)
-        m_hat = self.opt_m / (1 - beta_1 ** iter)
-        v_hat = self.opt_v / (1 - beta_2 ** iter)
-        grad = m_hat / (np.sqrt(v_hat) + 1e-8)
-        return grad
+        Adam gradient normalization.
+        """
+
+        self.opt_m = self.opt_m * beta_1 + (1.0 - beta_1) * grad
+        self.opt_v = self.opt_v * beta_2 + (1.0 - beta_2) * (grad ** 2)
+
+        m_hat = self.opt_m / (1.0 - beta_1 ** iter_idx)
+        v_hat = self.opt_v / (1.0 - beta_2 ** iter_idx)
+
+        return m_hat / (np.sqrt(v_hat) + 1e-8)
     
     def minimize(
             self,
