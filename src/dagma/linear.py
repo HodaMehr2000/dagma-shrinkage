@@ -64,7 +64,7 @@ class DagmaLinear:
 
 
 
-        def _condition_number(self, A: np.ndarray, eps: float = 1e-12) -> float:
+    def _condition_number(self, A: np.ndarray, eps: float = 1e-12) -> float:
         """
         Compute spectral condition number of a covariance matrix.
         """
@@ -73,6 +73,7 @@ class DagmaLinear:
         lam_min = float(np.min(eigvals))
         lam_min = max(lam_min, eps)
         return lam_max / lam_min
+        
 ###updated###
     def _set_covariance(self, use_shrinkage: bool = False, print_method: bool = True) -> None:
         """
